@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XAU/USD PREDATOR v6.0
+XAU/USD PREDATOR v6.0 (FIXED)
 Logika: Liquidity Sweep -> ChoCh -> Retest FVG -> Entry.
 SL: Di bawah/atas Wick Sweep (Anti-Hunt).
 TP: Di Likuiditas Swing berikutnya.
@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 # ==============================================================================
-# 1. KONFIGURASI (TANPA KOMPROMI)
+# 1. KONFIGURASI
 # ==============================================================================
 class Config:
     VERSION = "6.0"
@@ -32,11 +32,11 @@ class Config:
     
     # === PARAMETER TEKNIS ===
     SWING_LOOKBACK = 5
-    FVG_MIN_SIZE_ATR = 0.5  # FVG minimal harus 0.5x ATR agar valid
-    SL_WICK_BUFFER_ATR = 0.3  # Buffer di bawah/atas wick sweep untuk menghindari hunt
+    FVG_MIN_SIZE_ATR = 0.5
+    SL_WICK_BUFFER_ATR = 0.3
     
     # === SAFETY ===
-    COOLDOWN_HOURS = 12  # Minimal 12 jam antar sinyal (hindari overtrading)
+    COOLDOWN_HOURS = 12
     FETCH_DELAY = 1.0
     FETCH_TIMEOUT = 30
     MAX_TELEGRAM_LEN = 4000
@@ -128,7 +128,7 @@ def get_live_spot_price() -> float:
 def fetch_ohlcv(interval: str, limit: int = 300) -> List[Dict[str, Any]]:
     time.sleep(Config.FETCH_DELAY)
     yf_interval = {"15m": "15m", "1h": "60m", "4h": "60m", "1d": "1d"}.get(interval, interval)
-    range_map = {"15m": "5d", "1h":10d", "4h": "60d", "1d": "2y"}.get(interval, "60d")
+    range_map = {"15m": "5d", "1h": "10d", "4h": "60d", "1d": "2y"}.get(interval, "60d")
     
     for host in ("query1", "query2"):
         url = f"https://{host}.finance.yahoo.com/v8/finance/chart/GC=F?interval={yf_interval}&range={range_map}"
@@ -212,7 +212,7 @@ def analyze_predator_setup(data_d1: List[Dict], data_h4: List[Dict], data_h1: Li
     # 1. D1 Trend Filter
     closes_d1 = [d["close"] for d in data_d1]
     if len(closes_d1) < 200: return {"signal": "WAIT", "reason": "Data D1 kurang"}
-    ema50, ema200 = sum(closes_d1[-50:])/50, sum(closes_d1[-200:])/200 # Simplified EMA for speed
+    ema50, ema200 = sum(closes_d1[-50:])/50, sum(closes_d1[-200:])/200
     bias = "bullish" if live_price > ema50 > ema200 else "bearish" if live_price < ema50 < ema200 else "neutral"
     if bias == "neutral": return {"signal": "WAIT", "reason": "D1 Netral, tidak ada arah jelas"}
     
@@ -224,7 +224,6 @@ def analyze_predator_setup(data_d1: List[Dict], data_h4: List[Dict], data_h1: Li
     if bias == "bullish" and len(swings_h4["lows"]) >= 2:
         last_low = swings_h4["lows"][-1]["price"]
         prev = data_h4[-2]
-        # Harga menembus low sebelumnya, tapi close di atasnya (wick)
         if prev["low"] < last_low and prev["close"] > last_low:
             sweep_valid = True
             sweep_level = prev["low"]
@@ -245,7 +244,6 @@ def analyze_predator_setup(data_d1: List[Dict], data_h4: List[Dict], data_h1: Li
     
     target_fvg = None
     if bias == "bullish":
-        # Cari FVG Bullish yang belum terisi, di atas sweep level
         for fvg in fvgs_h1:
             if fvg["type"] == "bullish" and fvg["bottom"] > sweep_level and live_price <= fvg["top"] and live_price >= fvg["bottom"]:
                 target_fvg = fvg
@@ -261,11 +259,8 @@ def analyze_predator_setup(data_d1: List[Dict], data_h4: List[Dict], data_h1: Li
     
     # 4. Kalkulasi SL & TP (Anti-Hunt)
     if bias == "bullish":
-        # SL ditempatkan DI BAWAH wick sweep, ditambah buffer
         sl_price = sweep_level - (atr_h1 * Config.SL_WICK_BUFFER_ATR)
         sl_distance = live_price - sl_price
-        
-        # TP ditempatkan di Swing High H4 berikutnya
         tp_price = swings_h4["highs"][-1]["price"] if swings_h4["highs"] else live_price + (sl_distance * 2)
         tp_distance = tp_price - live_price
         direction = "BUY"
@@ -342,15 +337,15 @@ def run():
             f"──────────────────────\n"
             f"<b>🧠 Logika Predator:</b>\n"
             f"  • {result['reason']}\n"
-            f"  • SL ditempatkan di luar jangkauan 'Wick Hunt'\n"
-            f"  • Entry saat retest FVG, bukan saat breakout\n"
+            f"  • SL di luar jangkauan 'Wick Hunt'\n"
+            f"  • Entry saat retest FVG\n"
             f"──────────────────────\n"
             f"<b>⚠️ ATURAN MUTLAK:</b>\n"
             f"• Pasang SL di ${result['sl']:.2f} (JANGAN DIGESER)\n"
             f"• Risiko maksimal 1% dari modal\n"
-            f"• Jika harga belum masuk area FVG, JANGAN ENTRY DULU\n"
+            f"• Jika harga belum masuk area FVG, JANGAN ENTRY\n"
             f"──────────────────────\n"
-            f"<i>Ini bukan tebakan. Ini adalah eksekusi berdasarkan jejak institusi.</i>"
+            f"<i>Eksekusi berdasarkan jejak institusi.</i>"
         )
         
         if send_telegram(msg):
