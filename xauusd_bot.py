@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XAU/USD GRADE SIGNAL BOT v2.0
-Multi-Confluence + Multi-Timeframe + Smart Money Concepts
-Grade System: A / A+ / A SUPER
+XAU/USD HIGH PROBABILITY SCANNER v5.0
+Bukan bot sinyal, tapi scanner setup langka dengan probabilitas tinggi.
+Hanya memberi sinyal jika SEMUA kriteria ketat terpenuhi.
 
-Author: Quant System
-Target: Win Rate 50-60% | R:R 1:2 to 1:4
+Target: 2-4 sinyal per bulan, win rate 65-70%, R:R minimal 1:2.5
 """
 import os
-import sys
 import json
 import math
 import time
@@ -21,836 +19,508 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 # ==============================================================================
-# 1. KONFIGURASI UTAMA
+# 1. KONFIGURASI (SANGAT KETAT)
 # ==============================================================================
 class Config:
-    VERSION = "2.0"
-    BOT_NAME = "XAU/USD Grade Signal"
+    VERSION = "5.0"
+    BOT_NAME = "XAU/USD HP Scanner"
     
-    # === INDIKATOR PARAMETER ===
-    RSI_PERIOD = 14
-    RSI_OVERSOLD = 30
-    RSI_OVERBOUGHT = 70
-    RSI_STRONG_OVSELL = 20
-    RSI_STRONG_OVBUY = 80
+    # === KRITERIA KETAT (SEMUA HARUS TERPENUHI) ===
+    # 1. Daily trend harus SANGAT jelas (EMA 50 > EMA 200 atau sebaliknya)
+    MIN_DAILY_EMA_SPREAD = 50.0  # Minimal $50 spread antara EMA 50 & 200
     
-    STOCH_K = 14
-    STOCH_D = 3
-    STOCH_OVERSOLD = 20
-    STOCH_OVERBOUGHT = 80
+    # 2. H4 harus konfirmasi dengan BOS/ChoCh yang jelas
+    MIN_H4_SWING_SIZE_ATR = 2.0  # Minimal 2x ATR untuk swing yang valid
     
-    MACD_FAST = 12
-    MACD_SLOW = 26
-    MACD_SIGNAL = 9
+    # 3. H1 entry harus di area liquidity sweep + Order Block
+    MIN_LIQUIDITY_SWEEP_ATR = 1.5  # Sweep minimal 1.5x ATR
     
-    BB_PERIOD = 20
-    BB_STD = 2.0
+    # 4. Kill Zone WAJIB (London atau NY)
+    KILL_ZONE_REQUIRED = True
     
+    # 5. Volume spike WAJIB
+    MIN_VOLUME_SPIKE = 1.5  # Minimal 1.5x average volume
+    
+    # 6. Risk:Reward minimal 1:2.5
+    MIN_RR_RATIO = 2.5
+    
+    # === RISK MANAGEMENT ===
     ATR_PERIOD = 14
-    ATR_SL_MULT = 2.0
+    ATR_SL_MULT = 2.0  # SL = 2x ATR (lebih ketat)
     
-    EMA_FAST = 20
-    EMA_MID = 50
-    EMA_SLOW = 200
+    # === KILL ZONE (WIB = UTC+7) ===
+    KZ_LONDON = (7, 10)   # 14:00-17:00 WIB
+    KZ_NY = (12, 16)      # 19:00-23:00 WIB
     
-    ADX_PERIOD = 14
-    ADX_TREND_THRESHOLD = 20
-    
-    VOLUME_SPIKE_MULT = 1.5
-    
-    # === GRADE SYSTEM ===
-    # Grade A: 4/8 confluence + 1 TF aligned
-    # Grade A+: 6/8 confluence + 2 TF aligned
-    # Grade A SUPER: 8/8 confluence + 2 TF aligned + volume spike + strong pattern
-    GRADE_A_MIN_SCORE = 4
-    GRADE_A_PLUS_MIN_SCORE = 6
-    GRADE_A_SUPER_MIN_SCORE = 8
-    
-    # Risk:Reward per grade
-    RR_GRADE_A = 2.0
-    RR_GRADE_A_PLUS = 3.0
-    RR_GRADE_A_SUPER = 4.0
-    
-    # === SAFETY & PRODUCTION ===
-    COOLDOWN_MINUTES = 240  # 4 jam antar sinyal
+    # === SAFETY ===
+    COOLDOWN_HOURS = 24  # Minimal 24 jam antar sinyal
     FETCH_DELAY = 1.5
     FETCH_TIMEOUT = 30
     MAX_TELEGRAM_LEN = 4000
     SKIP_WEEKEND = True
     STATE_FILE = ".last_signal_state.json"
     
-    # === TELEGRAM ===
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ==============================================================================
 # 2. LOGGING & TELEGRAM
 # ==============================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-log = logging.getLogger("XAUUSD_BOT")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+log = logging.getLogger("HP_SCANNER")
 
 def escape_html(text: str) -> str:
-    """Escape karakter HTML berbahaya, pertahankan tag yang diizinkan."""
-    text = text.replace('&', '&amp;')
-    text = text.replace('<', '&lt;')
-    text = text.replace('>', '&gt;')
-    for tag in ['b', '/b', 'i', '/i', 'code', '/code', 'pre', '/pre']:
+    text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    for tag in ['b', '/b', 'i', '/i', 'code', '/code']:
         text = text.replace(f'&lt;{tag}&gt;', f'<{tag}>')
     return text
 
 def send_telegram(text: str) -> bool:
-    """Kirim pesan ke Telegram dengan error handling."""
-    token = Config.TELEGRAM_TOKEN
-    chat_id = Config.TELEGRAM_CHAT_ID
+    token, chat_id = Config.TELEGRAM_TOKEN, Config.TELEGRAM_CHAT_ID
     if not token or not chat_id:
         log.info("Telegram tidak dikonfigurasi.")
         return False
-    
     text = escape_html(text)
     if len(text) > Config.MAX_TELEGRAM_LEN:
         text = text[:Config.MAX_TELEGRAM_LEN - 100] + "\n\n... (truncated)"
-    
     try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        r = requests.post(url, json={
-            "chat_id": chat_id, "text": text, "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }, timeout=10)
-        if r.status_code == 200:
-            log.info("✅ Telegram terkirim.")
-            return True
-        else:
-            log.error(f"Telegram gagal: {r.text}")
-            return False
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                          json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
+        return r.status_code == 200
     except Exception as e:
         log.error(f"Telegram error: {e}")
         return False
 
 # ==============================================================================
-# 3. STATE MANAGEMENT (Anti-Loop / Anti-Spam)
+# 3. STATE MANAGEMENT
 # ==============================================================================
 class StateManager:
-    """Kelola state untuk mencegah sinyal berulang (anti-loop)."""
-    
-    def __init__(self, state_file: str = Config.STATE_FILE):
-        self.state_file = Path(state_file)
+    def __init__(self):
+        self.state_file = Path(Config.STATE_FILE)
         self.state = self._load()
     
-    def _load(self) -> Dict[str, Any]:
+    def _load(self) -> Dict:
         if self.state_file.exists():
             try:
-                with open(self.state_file, 'r') as f:
-                    return json.load(f)
-            except Exception:
-                return {}
+                with open(self.state_file, 'r') as f: return json.load(f)
+            except Exception: return {}
         return {}
     
     def _save(self):
         try:
-            with open(self.state_file, 'w') as f:
-                json.dump(self.state, f, indent=2)
-        except Exception as e:
-            log.warning(f"Gagal simpan state: {e}")
+            with open(self.state_file, 'w') as f: json.dump(self.state, f, indent=2)
+        except Exception as e: log.warning(f"Gagal simpan state: {e}")
     
-    def can_send_signal(self, direction: str, price: float) -> Tuple[bool, str]:
-        """Cek apakah boleh kirim sinyal baru (anti-spam)."""
+    def can_send(self, direction: str, price: float) -> Tuple[bool, str]:
         last = self.state.get("last_signal")
-        if not last:
-            return True, ""
-        
+        if not last: return True, ""
         last_time = datetime.fromisoformat(last["time"])
         now = datetime.now(timezone.utc)
-        minutes_since = (now - last_time).total_seconds() / 60
-        
-        if minutes_since < Config.COOLDOWN_MINUTES:
-            return False, f"Cooldown aktif ({minutes_since:.0f} menit lalu)"
-        
-        # Cek apakah sinyal sama dengan harga mirip (< 0.1% beda)
-        if last["direction"] == direction:
-            price_diff_pct = abs(last["price"] - price) / price * 100
-            if price_diff_pct < 0.1:
-                return False, f"Sinyal {direction} sama sudah dikirim"
-        
+        hours_since = (now - last_time).total_seconds() / 3600
+        if hours_since < Config.COOLDOWN_HOURS:
+            return False, f"Cooldown ({hours_since:.1f} jam lalu)"
+        if last["direction"] == direction and abs(last["price"] - price) / price * 100 < 0.1:
+            return False, f"Sinyal {direction} sama sudah dikirim"
         return True, ""
     
-    def record_signal(self, direction: str, price: float, grade: str):
-        """Catat sinyal yang baru dikirim."""
+    def record(self, direction: str, price: float):
         self.state["last_signal"] = {
             "time": datetime.now(timezone.utc).isoformat(),
-            "direction": direction,
-            "price": price,
-            "grade": grade
+            "direction": direction, "price": price
         }
         self._save()
 
 # ==============================================================================
-# 4. DATA FETCHER (Multi-Source dengan Fallback)
+# 4. DATA FETCHER
 # ==============================================================================
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 def get_live_spot_price() -> float:
-    """Ambil harga Spot XAU/USD real-time (sesuai MT5)."""
-    apis = [
-        "https://api.gold-api.com/price/XAU",
-        "https://data-asg.goldprice.org/dbXRates/USD"
-    ]
-    
-    for api_url in apis:
+    for api_url in ["https://api.gold-api.com/price/XAU", "https://data-asg.goldprice.org/dbXRates/USD"]:
         try:
             r = requests.get(api_url, timeout=10)
             if r.status_code == 200:
                 data = r.json()
-                if "price" in data:
-                    price = float(data["price"])
-                elif "items" in data and data["items"]:
-                    price = float(data["items"][0].get("xauPrice", 0))
-                else:
-                    continue
-                
+                price = float(data.get("price", 0)) if "price" in data else float(data.get("items", [{}])[0].get("xauPrice", 0))
                 if price > 0:
                     log.info(f"✅ Harga Spot Live: ${price:.2f}")
                     return price
-        except Exception as e:
-            log.warning(f"API {api_url} gagal: {e}")
-            continue
-    
+        except Exception: continue
     return 0.0
 
-def fetch_ohlcv(interval: str = "30m", limit: int = 300) -> List[Dict[str, Any]]:
-    """Fetch OHLCV dari Yahoo Finance (GC=F sebagai proxy Gold)."""
+def fetch_ohlcv(interval: str, limit: int = 300) -> List[Dict[str, Any]]:
     time.sleep(Config.FETCH_DELAY)
-    
-    # Map interval ke format Yahoo
-    yf_interval = {"30m": "30m", "1h": "60m", "15m": "15m"}.get(interval, interval)
-    range_map = {"30m": "5d", "1h": "10d", "15m": "5d"}.get(interval, "5d")
+    yf_interval = {"15m": "15m", "1h": "60m", "4h": "60m", "1d": "1d"}.get(interval, interval)
+    range_map = {"15m": "5d", "1h": "10d", "4h": "60d", "1d": "2y"}.get(interval, "60d")
     
     for host in ("query1", "query2"):
         url = f"https://{host}.finance.yahoo.com/v8/finance/chart/GC=F?interval={yf_interval}&range={range_map}"
-        
         for attempt in range(3):
             try:
                 r = requests.get(url, headers=HEADERS, timeout=Config.FETCH_TIMEOUT)
                 if r.status_code == 429:
-                    time.sleep((2 ** attempt) + random.uniform(0, 1))
-                    continue
+                    time.sleep((2 ** attempt) + random.uniform(0, 1)); continue
                 r.raise_for_status()
-                
                 data = r.json()
                 result = data["chart"]["result"][0]
                 ts = result.get("timestamp") or []
                 q = result["indicators"]["quote"][0]
-                
                 out = []
                 for i, t in enumerate(ts):
                     try:
-                        o = q["open"][i]
-                        h = q["high"][i]
-                        l = q["low"][i]
-                        c = q["close"][i]
+                        o, h, l, c = q["open"][i], q["high"][i], q["low"][i], q["close"][i]
                         v = q["volume"][i] if q.get("volume") else 0
-                        
-                        if None in (o, h, l, c) or h < l or o <= 0 or c <= 0:
-                            continue
-                        
-                        dt = datetime.fromtimestamp(t, timezone.utc)
-                        out.append({
-                            "time": dt, "open": float(o), "high": float(h),
-                            "low": float(l), "close": float(c),
-                            "volume": float(v) if v else 0
-                        })
-                    except (KeyError, IndexError, TypeError):
-                        continue
+                        if None in (o, h, l, c) or h < l or o <= 0 or c <= 0: continue
+                        out.append({"time": datetime.fromtimestamp(t, timezone.utc),
+                                    "open": float(o), "high": float(h), "low": float(l),
+                                    "close": float(c), "volume": float(v) if v else 0})
+                    except (KeyError, IndexError, TypeError): continue
+                
+                if interval == "4h" and len(out) > 4:
+                    out = aggregate_ohlcv(out, 4)
                 
                 log.info(f"✅ Data {interval}: {len(out)} bars")
                 return out[-limit:]
-                
             except Exception as e:
                 log.warning(f"Fetch {interval} gagal (attempt {attempt+1}): {e}")
                 time.sleep((2 ** attempt) + random.uniform(0, 1))
-    
     raise RuntimeError(f"Gagal ambil data {interval}")
 
+def aggregate_ohlcv(data: List[Dict], n: int) -> List[Dict]:
+    result = []
+    for i in range(0, len(data) - n + 1, n):
+        chunk = data[i:i+n]
+        if len(chunk) < n: break
+        result.append({
+            "time": chunk[0]["time"],
+            "open": chunk[0]["open"],
+            "high": max(c["high"] for c in chunk),
+            "low": min(c["low"] for c in chunk),
+            "close": chunk[-1]["close"],
+            "volume": sum(c["volume"] for c in chunk)
+        })
+    return result
+
 # ==============================================================================
-# 5. INDIKATOR CALCULATIONS (Semua yang saya tahu)
+# 5. HELPER INDICATORS
 # ==============================================================================
-def calc_rsi(closes: List[float], period: int = 14) -> float:
-    """Relative Strength Index."""
-    if len(closes) < period + 1:
-        return 50.0
-    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    gains = [d if d > 0 else 0 for d in deltas]
-    losses = [-d if d < 0 else 0 for d in deltas]
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def calc_ema(closes: List[float], period: int) -> float:
-    """Exponential Moving Average."""
-    if len(closes) < period:
-        return closes[-1] if closes else 0.0
-    multiplier = 2 / (period + 1)
-    ema = sum(closes[:period]) / period
-    for price in closes[period:]:
-        ema = (price - ema) * multiplier + ema
-    return ema
-
-def calc_sma(values: List[float], period: int) -> float:
-    """Simple Moving Average."""
-    if len(values) < period:
-        return sum(values) / len(values) if values else 0.0
-    return sum(values[-period:]) / period
-
-def calc_macd(closes: List[float]) -> Dict[str, float]:
-    """MACD Line, Signal Line, Histogram."""
-    if len(closes) < Config.MACD_SLOW + Config.MACD_SIGNAL:
-        return {"macd": 0, "signal": 0, "histogram": 0}
-    
-    ema_fast = calc_ema(closes, Config.MACD_FAST)
-    ema_slow = calc_ema(closes, Config.MACD_SLOW)
-    macd_line = ema_fast - ema_slow
-    
-    # Hitung historical MACD values untuk signal line
-    macd_values = []
-    for i in range(Config.MACD_SLOW, len(closes)):
-        ef = calc_ema(closes[:i+1], Config.MACD_FAST)
-        es = calc_ema(closes[:i+1], Config.MACD_SLOW)
-        macd_values.append(ef - es)
-    
-    signal_line = calc_ema(macd_values, Config.MACD_SIGNAL) if len(macd_values) >= Config.MACD_SIGNAL else macd_line
-    histogram = macd_line - signal_line
-    
-    # Cek crossover (perubahan histogram sign)
-    prev_histogram = macd_values[-2] - calc_ema(macd_values[:-1], Config.MACD_SIGNAL) if len(macd_values) > 1 else 0
-    crossover = "bullish" if prev_histogram < 0 and histogram > 0 else \
-                "bearish" if prev_histogram > 0 and histogram < 0 else "none"
-    
-    return {"macd": macd_line, "signal": signal_line, "histogram": histogram, "crossover": crossover}
-
-def calc_bollinger(closes: List[float], period: int = 20, std_dev: float = 2.0) -> Dict[str, float]:
-    """Bollinger Bands."""
-    if len(closes) < period:
-        return {"upper": closes[-1], "middle": closes[-1], "lower": closes[-1], "width": 0, "pct_b": 0.5}
-    
-    sma = sum(closes[-period:]) / period
-    variance = sum((x - sma) ** 2 for x in closes[-period:]) / period
-    std = math.sqrt(variance)
-    
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    width = (upper - lower) / sma * 100 if sma > 0 else 0
-    
-    current = closes[-1]
-    pct_b = (current - lower) / (upper - lower) if (upper - lower) > 0 else 0.5
-    
-    return {"upper": upper, "middle": sma, "lower": lower, "width": width, "pct_b": pct_b}
-
-def calc_atr(data: List[Dict[str, Any]], period: int = 14) -> float:
-    """Average True Range."""
-    if len(data) < 2:
-        return 0.0
+def calc_atr(data: List[Dict], period: int = 14) -> float:
+    if len(data) < 2: return 0.0
     trs = []
     for i in range(1, len(data)):
         h, l, pc = data[i]["high"], data[i]["low"], data[i-1]["close"]
         trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    if len(trs) < period:
-        return sum(trs) / len(trs) if trs else 0.0
+    if len(trs) < period: return sum(trs) / len(trs) if trs else 0.0
     return sum(trs[-period:]) / period
 
-def calc_adx(data: List[Dict[str, Any]], period: int = 14) -> Tuple[float, float, float]:
-    """ADX, +DI, -DI. Returns (adx, plus_di, minus_di)."""
-    if len(data) < period * 2:
-        return 0.0, 0.0, 0.0
-    
-    plus_dm, minus_dm, tr_list = [], [], []
-    for i in range(1, len(data)):
-        h_diff = data[i]["high"] - data[i-1]["high"]
-        l_diff = data[i-1]["low"] - data[i]["low"]
-        plus_dm.append(h_diff if h_diff > l_diff and h_diff > 0 else 0)
-        minus_dm.append(l_diff if l_diff > h_diff and l_diff > 0 else 0)
-        h, l, pc = data[i]["high"], data[i]["low"], data[i-1]["close"]
-        tr_list.append(max(h - l, abs(h - pc), abs(l - pc)))
-    
-    def wilder_smooth(values, period):
-        if len(values) < period:
-            return []
-        smoothed = [sum(values[:period])]
-        for i in range(period, len(values)):
-            smoothed.append(smoothed[-1] - smoothed[-1]/period + values[i])
-        return smoothed
-    
-    plus_smooth = wilder_smooth(plus_dm, period)
-    minus_smooth = wilder_smooth(minus_dm, period)
-    tr_smooth = wilder_smooth(tr_list, period)
-    
-    dx_list = []
-    plus_di_list, minus_di_list = [], []
-    for i in range(len(plus_smooth)):
-        if tr_smooth[i] == 0:
-            dx_list.append(0)
-            plus_di_list.append(0)
-            minus_di_list.append(0)
-            continue
-        pdi = 100 * plus_smooth[i] / tr_smooth[i]
-        mdi = 100 * minus_smooth[i] / tr_smooth[i]
-        plus_di_list.append(pdi)
-        minus_di_list.append(mdi)
-        di_sum = pdi + mdi
-        dx_list.append(100 * abs(pdi - mdi) / di_sum if di_sum > 0 else 0)
-    
-    if len(dx_list) < period:
-        return 0.0, plus_di_list[-1] if plus_di_list else 0, minus_di_list[-1] if minus_di_list else 0
-    
-    adx = sum(dx_list[-period:]) / period
-    return adx, plus_di_list[-1], minus_di_list[-1]
+def calc_ema(values: List[float], period: int) -> float:
+    if len(values) < period: return values[-1] if values else 0.0
+    multiplier = 2 / (period + 1)
+    ema = sum(values[:period]) / period
+    for price in values[period:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
 
-def calc_stochastic(data: List[Dict[str, Any]], k_period: int = 14, d_period: int = 3) -> Dict[str, float]:
-    """Stochastic Oscillator."""
-    if len(data) < k_period:
-        return {"k": 50, "d": 50}
-    
-    recent = data[-k_period:]
-    high_max = max(d["high"] for d in recent)
-    low_min = min(d["low"] for d in recent)
-    
-    if high_max == low_min:
-        return {"k": 50, "d": 50}
-    
-    current_close = data[-1]["close"]
-    k = 100 * (current_close - low_min) / (high_max - low_min)
-    
-    # %D = SMA of %K
-    k_values = []
-    for i in range(k_period, len(data)):
-        window = data[i-k_period:i]
-        hh = max(d["high"] for d in window)
-        ll = min(d["low"] for d in window)
-        if hh == ll:
-            k_values.append(50)
-        else:
-            k_values.append(100 * (data[i]["close"] - ll) / (hh - ll))
-    
-    d = sum(k_values[-d_period:]) / d_period if len(k_values) >= d_period else k
-    
-    return {"k": k, "d": d}
+def find_swing_points(data: List[Dict], lookback: int = 5) -> Dict[str, List[Dict]]:
+    swing_highs, swing_lows = [], []
+    for i in range(lookback, len(data) - lookback):
+        is_sh = all(data[i]["high"] > data[i-j]["high"] and data[i]["high"] > data[i+j]["high"] for j in range(1, lookback+1))
+        is_sl = all(data[i]["low"] < data[i-j]["low"] and data[i]["low"] < data[i+j]["low"] for j in range(1, lookback+1))
+        if is_sh: swing_highs.append({"idx": i, "price": data[i]["high"], "time": data[i]["time"]})
+        if is_sl: swing_lows.append({"idx": i, "price": data[i]["low"], "time": data[i]["time"]})
+    return {"highs": swing_highs, "lows": swing_lows}
 
-def detect_candle_patterns(data: List[Dict[str, Any]]) -> Dict[str, bool]:
-    """Deteksi pola candlestick penting."""
-    patterns = {
-        "bullish_engulfing": False,
-        "bearish_engulfing": False,
-        "bullish_pinbar": False,
-        "bearish_pinbar": False,
-        "doji": False,
-        "strong_bullish_candle": False,
-        "strong_bearish_candle": False
-    }
-    
-    if len(data) < 3:
-        return patterns
-    
-    last = data[-1]
-    prev = data[-2]
-    prev2 = data[-3]
-    
-    body_last = abs(last["close"] - last["open"])
-    body_prev = abs(prev["close"] - prev["open"])
-    range_last = last["high"] - last["low"]
-    
-    # Bullish Engulfing
-    if (prev["close"] < prev["open"] and last["close"] > last["open"] and
-        last["close"] > prev["open"] and last["open"] < prev["close"]):
-        patterns["bullish_engulfing"] = True
-    
-    # Bearish Engulfing
-    if (prev["close"] > prev["open"] and last["close"] < last["open"] and
-        last["close"] < prev["open"] and last["open"] > prev["close"]):
-        patterns["bearish_engulfing"] = True
-    
-    # Bullish Pin Bar (lower wick > 2x body, close near high)
-    lower_wick = min(last["open"], last["close"]) - last["low"]
-    upper_wick = last["high"] - max(last["open"], last["close"])
-    if lower_wick > 2 * body_last and upper_wick < body_last and body_last > 0:
-        patterns["bullish_pinbar"] = True
-    
-    # Bearish Pin Bar
-    if upper_wick > 2 * body_last and lower_wick < body_last and body_last > 0:
-        patterns["bearish_pinbar"] = True
-    
-    # Doji
-    if range_last > 0 and body_last / range_last < 0.1:
-        patterns["doji"] = True
-    
-    # Strong Bullish Candle (body > 70% of range)
-    if last["close"] > last["open"] and range_last > 0 and body_last / range_last > 0.7:
-        patterns["strong_bullish_candle"] = True
-    
-    # Strong Bearish Candle
-    if last["close"] < last["open"] and range_last > 0 and body_last / range_last > 0.7:
-        patterns["strong_bearish_candle"] = True
-    
-    return patterns
-
-def calc_pivot_points(data: List[Dict[str, Any]]) -> Dict[str, float]:
-    """Pivot Points untuk Support/Resistance."""
-    if len(data) < 2:
-        return {}
-    
-    prev = data[-2]
-    pivot = (prev["high"] + prev["low"] + prev["close"]) / 3
-    r1 = 2 * pivot - prev["low"]
-    s1 = 2 * pivot - prev["high"]
-    r2 = pivot + (prev["high"] - prev["low"])
-    s2 = pivot - (prev["high"] - prev["low"])
-    
-    return {"pivot": pivot, "r1": r1, "r2": r2, "s1": s1, "s2": s2}
-
-def calc_volume_analysis(data: List[Dict[str, Any]], period: int = 20) -> Dict[str, Any]:
-    """Analisis volume."""
-    if len(data) < period:
-        return {"avg": 0, "current": 0, "ratio": 1.0, "spike": False}
-    
-    vols = [d["volume"] for d in data[-period-1:-1]]
-    avg = sum(vols) / len(vols) if vols else 0
-    current = data[-1]["volume"]
-    ratio = current / avg if avg > 0 else 1.0
-    
-    return {
-        "avg": avg, "current": current, "ratio": ratio,
-        "spike": ratio >= Config.VOLUME_SPIKE_MULT
-    }
+def is_kill_zone() -> Tuple[bool, str]:
+    now_utc = datetime.now(timezone.utc)
+    hour = now_utc.hour
+    if Config.KZ_LONDON[0] <= hour < Config.KZ_LONDON[1]:
+        return True, "London Kill Zone"
+    if Config.KZ_NY[0] <= hour < Config.KZ_NY[1]:
+        return True, "New York Kill Zone"
+    return False, f"Outside Kill Zone (UTC {hour}:00)"
 
 # ==============================================================================
-# 6. SIGNAL ANALYSIS (Multi-Confluence + Grade System)
+# 6. HIGH PROBABILITY SETUP DETECTION
 # ==============================================================================
-def analyze_timeframe(data: List[Dict[str, Any]], tf_name: str) -> Dict[str, Any]:
-    """Analisis lengkap untuk 1 timeframe."""
-    if len(data) < 100:
-        return {"valid": False, "reason": "Data tidak cukup"}
+def check_daily_trend(data_d1: List[Dict], live_price: float) -> Tuple[bool, str, float]:
+    """KRITERIA 1: Daily trend SANGAT jelas (EMA spread minimal $50)"""
+    if len(data_d1) < 200:
+        return False, "Data D1 tidak cukup", 0.0
     
-    closes = [d["close"] for d in data]
-    current_price = closes[-1]
+    closes = [d["close"] for d in data_d1]
+    ema50 = calc_ema(closes, 50)
+    ema200 = calc_ema(closes, 200)
+    spread = abs(ema50 - ema200)
     
-    # Hitung semua indikator
-    rsi = calc_rsi(closes, Config.RSI_PERIOD)
-    stoch = calc_stochastic(data, Config.STOCH_K, Config.STOCH_D)
-    macd = calc_macd(closes)
-    bb = calc_bollinger(closes, Config.BB_PERIOD, Config.BB_STD)
-    atr = calc_atr(data, Config.ATR_PERIOD)
-    adx, plus_di, minus_di = calc_adx(data, Config.ADX_PERIOD)
-    ema_fast = calc_ema(closes, Config.EMA_FAST)
-    ema_mid = calc_ema(closes, Config.EMA_MID)
-    ema_slow = calc_ema(closes, Config.EMA_SLOW)
-    patterns = detect_candle_patterns(data)
-    pivots = calc_pivot_points(data)
-    volume = calc_volume_analysis(data)
+    if spread < Config.MIN_DAILY_EMA_SPREAD:
+        return False, f"Daily EMA spread terlalu kecil (${spread:.2f} < ${Config.MIN_DAILY_EMA_SPREAD})", spread
     
-    # === SCORING SYSTEM (8 poin maksimal) ===
-    bullish_score = 0
-    bearish_score = 0
-    bullish_reasons = []
-    bearish_reasons = []
+    if live_price > ema50 > ema200:
+        return True, "Daily BULLISH kuat", spread
+    elif live_price < ema50 < ema200:
+        return True, "Daily BEARISH kuat", spread
+    else:
+        return False, "Daily tidak trending jelas", spread
+
+def check_h4_structure(data_h4: List[Dict], daily_bias: str, atr: float) -> Tuple[bool, str]:
+    """KRITERIA 2: H4 harus ada BOS/ChoCh yang jelas (minimal 2x ATR)"""
+    swings = find_swing_points(data_h4, 3)
     
-    # 1. RSI (1 poin)
-    if rsi < Config.RSI_STRONG_OVSELL:
-        bullish_score += 1
-        bullish_reasons.append(f"RSI extreme oversold ({rsi:.0f})")
-    elif rsi < Config.RSI_OVERSOLD:
-        bullish_score += 1
-        bullish_reasons.append(f"RSI oversold ({rsi:.0f})")
-    elif rsi > Config.RSI_STRONG_OVBUY:
-        bearish_score += 1
-        bearish_reasons.append(f"RSI extreme overbought ({rsi:.0f})")
-    elif rsi > Config.RSI_OVERBOUGHT:
-        bearish_score += 1
-        bearish_reasons.append(f"RSI overbought ({rsi:.0f})")
+    if len(swings["highs"]) < 2 or len(swings["lows"]) < 2:
+        return False, "H4 swing tidak cukup"
     
-    # 2. MACD (1 poin)
-    if macd["crossover"] == "bullish":
-        bullish_score += 1
-        bullish_reasons.append("MACD bullish crossover")
-    elif macd["crossover"] == "bearish":
-        bearish_score += 1
-        bearish_reasons.append("MACD bearish crossover")
-    elif macd["histogram"] > 0 and macd["macd"] > 0:
-        bullish_score += 1
-        bullish_reasons.append("MACD bullish momentum")
-    elif macd["histogram"] < 0 and macd["macd"] < 0:
-        bearish_score += 1
-        bearish_reasons.append("MACD bearish momentum")
+    last_high = swings["highs"][-1]["price"]
+    prev_high = swings["highs"][-2]["price"]
+    last_low = swings["lows"][-1]["price"]
+    prev_low = swings["lows"][-2]["price"]
     
-    # 3. EMA Trend (1 poin)
-    if ema_fast > ema_mid > ema_slow:
-        bullish_score += 1
-        bullish_reasons.append("EMA perfect alignment (20>50>200)")
-    elif current_price > ema_slow and ema_fast > ema_slow:
-        bullish_score += 1
-        bullish_reasons.append("Price > EMA 200 (uptrend)")
-    elif ema_fast < ema_mid < ema_slow:
-        bearish_score += 1
-        bearish_reasons.append("EMA perfect alignment (20<50<200)")
-    elif current_price < ema_slow and ema_fast < ema_slow:
-        bearish_score += 1
-        bearish_reasons.append("Price < EMA 200 (downtrend)")
+    current_price = data_h4[-1]["close"]
     
-    # 4. Bollinger Bands (1 poin)
-    if bb["pct_b"] < 0.05:
-        bullish_score += 1
-        bullish_reasons.append(f"Price at BB lower ({bb['pct_b']:.2f})")
-    elif bb["pct_b"] > 0.95:
-        bearish_score += 1
-        bearish_reasons.append(f"Price at BB upper ({bb['pct_b']:.2f})")
-    elif bb["width"] < 2.0:
-        # Squeeze - tunggu breakout
-        pass
+    if daily_bias == "bullish":
+        # Cari bullish BOS: current > last_high, dan last_high - prev_high > 2x ATR
+        if current_price > last_high:
+            swing_size = last_high - prev_high
+            if swing_size > atr * Config.MIN_H4_SWING_SIZE_ATR:
+                return True, f"H4 Bullish BOS valid (${swing_size:.2f})"
+        return False, "H4 tidak ada bullish BOS valid"
     
-    # 5. Stochastic (1 poin)
-    if stoch["k"] < Config.STOCH_OVERSOLD and stoch["d"] < Config.STOCH_OVERSOLD:
-        bullish_score += 1
-        bullish_reasons.append(f"Stochastic oversold (K:{stoch['k']:.0f} D:{stoch['d']:.0f})")
-    elif stoch["k"] > Config.STOCH_OVERBOUGHT and stoch["d"] > Config.STOCH_OVERBOUGHT:
-        bearish_score += 1
-        bearish_reasons.append(f"Stochastic overbought (K:{stoch['k']:.0f} D:{stoch['d']:.0f})")
+    if daily_bias == "bearish":
+        # Cari bearish BOS: current < last_low, dan prev_low - last_low > 2x ATR
+        if current_price < last_low:
+            swing_size = prev_low - last_low
+            if swing_size > atr * Config.MIN_H4_SWING_SIZE_ATR:
+                return True, f"H4 Bearish BOS valid (${swing_size:.2f})"
+        return False, "H4 tidak ada bearish BOS valid"
     
-    # 6. ADX + DI (1 poin)
-    if adx > Config.ADX_TREND_THRESHOLD:
-        if plus_di > minus_di:
-            bullish_score += 1
-            bullish_reasons.append(f"ADX trend up ({adx:.0f}, +DI>{'-'}DI)")
-        elif minus_di > plus_di:
-            bearish_score += 1
-            bearish_reasons.append(f"ADX trend down ({adx:.0f}, -DI>+DI)")
+    return False, "Daily bias tidak jelas"
+
+def check_h1_liquidity_sweep(data_h1: List[Dict], daily_bias: str, atr: float) -> Tuple[bool, str, float]:
+    """KRITERIA 3: H1 harus ada liquidity sweep yang jelas"""
+    swings = find_swing_points(data_h1, 3)
     
-    # 7. Candlestick Pattern (1 poin)
-    if patterns["bullish_engulfing"] or patterns["bullish_pinbar"]:
-        bullish_score += 1
-        pattern_name = "Bullish Engulfing" if patterns["bullish_engulfing"] else "Bullish Pin Bar"
-        bullish_reasons.append(f"Pattern: {pattern_name}")
-    elif patterns["bearish_engulfing"] or patterns["bearish_pinbar"]:
-        bearish_score += 1
-        pattern_name = "Bearish Engulfing" if patterns["bearish_engulfing"] else "Bearish Pin Bar"
-        bearish_reasons.append(f"Pattern: {pattern_name}")
+    if not swings["highs"] or not swings["lows"]:
+        return False, "H1 swing tidak cukup", 0.0
     
-    # 8. Volume Confirmation (1 poin)
-    if volume["spike"]:
-        if bullish_score > bearish_score:
-            bullish_score += 1
-            bullish_reasons.append(f"Volume spike ({volume['ratio']:.1f}x) + bullish")
-        elif bearish_score > bullish_score:
-            bearish_score += 1
-            bearish_reasons.append(f"Volume spike ({volume['ratio']:.1f}x) + bearish")
+    if len(data_h1) < 3:
+        return False, "Data H1 tidak cukup", 0.0
     
-    # Tentukan arah
-    if bullish_score > bearish_score:
+    last = data_h1[-1]
+    prev = data_h1[-2]
+    
+    if daily_bias == "bullish":
+        # Cari sweep swing low
+        last_swing_low = swings["lows"][-1]["price"]
+        if prev["low"] < last_swing_low and last["close"] > last_swing_low:
+            sweep_size = last_swing_low - prev["low"]
+            if sweep_size > atr * Config.MIN_LIQUIDITY_SWEEP_ATR:
+                # Cari Order Block bullish terdekat
+                ob_level = find_nearest_bullish_ob(data_h1, last["close"], atr)
+                if ob_level > 0:
+                    return True, f"Liquidity sweep low ${last_swing_low:.2f} + OB ${ob_level:.2f}", ob_level
+        return False, "Tidak ada liquidity sweep bullish valid", 0.0
+    
+    if daily_bias == "bearish":
+        # Cari sweep swing high
+        last_swing_high = swings["highs"][-1]["price"]
+        if prev["high"] > last_swing_high and last["close"] < last_swing_high:
+            sweep_size = prev["high"] - last_swing_high
+            if sweep_size > atr * Config.MIN_LIQUIDITY_SWEEP_ATR:
+                # Cari Order Block bearish terdekat
+                ob_level = find_nearest_bearish_ob(data_h1, last["close"], atr)
+                if ob_level > 0:
+                    return True, f"Liquidity sweep high ${last_swing_high:.2f} + OB ${ob_level:.2f}", ob_level
+        return False, "Tidak ada liquidity sweep bearish valid", 0.0
+    
+    return False, "Daily bias tidak jelas", 0.0
+
+def find_nearest_bullish_ob(data: List[Dict], current_price: float, atr: float) -> float:
+    """Cari Order Block bullish terdekat di bawah harga saat ini"""
+    min_impulse = atr * 1.5
+    for i in range(len(data) - 2, 1, -1):
+        prev, curr = data[i-1], data[i]
+        if prev["close"] < prev["open"] and curr["close"] - prev["low"] > min_impulse and curr["close"] > curr["open"]:
+            if prev["low"] < current_price and prev["high"] > current_price - (atr * 3):
+                return prev["low"]
+    return 0.0
+
+def find_nearest_bearish_ob(data: List[Dict], current_price: float, atr: float) -> float:
+    """Cari Order Block bearish terdekat di atas harga saat ini"""
+    min_impulse = atr * 1.5
+    for i in range(len(data) - 2, 1, -1):
+        prev, curr = data[i-1], data[i]
+        if prev["close"] > prev["open"] and prev["high"] - curr["close"] > min_impulse and curr["close"] < curr["open"]:
+            if prev["high"] > current_price and prev["low"] < current_price + (atr * 3):
+                return prev["high"]
+    return 0.0
+
+def check_volume_spike(data_h1: List[Dict]) -> Tuple[bool, str]:
+    """KRITERIA 5: Volume spike minimal 1.5x average"""
+    if len(data_h1) < 20:
+        return False, "Data volume tidak cukup"
+    
+    recent_vol = sum(d["volume"] for d in data_h1[-3:]) / 3
+    avg_vol = sum(d["volume"] for d in data_h1[-20:]) / 20
+    
+    if avg_vol == 0:
+        return False, "Volume nol"
+    
+    ratio = recent_vol / avg_vol
+    if ratio >= Config.MIN_VOLUME_SPIKE:
+        return True, f"Volume spike {ratio:.1f}x"
+    return False, f"Volume tidak spike ({ratio:.1f}x)"
+
+# ==============================================================================
+# 7. MAIN SCANNER
+# ==============================================================================
+def scan_high_probability_setup() -> Dict[str, Any]:
+    """Scan setup dengan kriteria SANGAT KETAT."""
+    
+    # Cek Kill Zone
+    in_kz, kz_name = is_kill_zone()
+    if Config.KILL_ZONE_REQUIRED and not in_kz:
+        return {"signal": "WAIT", "reason": f"Bukan Kill Zone ({kz_name})", "checks": []}
+    
+    # Ambil harga live
+    live_price = get_live_spot_price()
+    if live_price == 0:
+        return {"signal": "ERROR", "reason": "Gagal ambil harga live", "checks": []}
+    
+    checks = []
+    
+    # Fetch data
+    try:
+        data_d1 = fetch_ohlcv("1d", 300)
+        data_h1_raw = fetch_ohlcv("1h", 300)
+        data_h4 = aggregate_ohlcv(data_h1_raw, 4)
+        data_h1 = data_h1_raw
+    except Exception as e:
+        return {"signal": "ERROR", "reason": f"Gagal fetch data: {e}", "checks": []}
+    
+    atr = calc_atr(data_h1, Config.ATR_PERIOD)
+    
+    # KRITERIA 1: Daily trend
+    daily_ok, daily_reason, ema_spread = check_daily_trend(data_d1, live_price)
+    checks.append({"name": "Daily Trend", "pass": daily_ok, "reason": daily_reason})
+    if not daily_ok:
+        return {"signal": "WAIT", "reason": daily_reason, "checks": checks, "price": live_price}
+    
+    daily_bias = "bullish" if "BULLISH" in daily_reason else "bearish"
+    
+    # KRITERIA 2: H4 structure
+    h4_ok, h4_reason = check_h4_structure(data_h4, daily_bias, atr)
+    checks.append({"name": "H4 Structure", "pass": h4_ok, "reason": h4_reason})
+    if not h4_ok:
+        return {"signal": "WAIT", "reason": h4_reason, "checks": checks, "price": live_price}
+    
+    # KRITERIA 3: H1 liquidity sweep
+    sweep_ok, sweep_reason, ob_level = check_h1_liquidity_sweep(data_h1, daily_bias, atr)
+    checks.append({"name": "H1 Sweep + OB", "pass": sweep_ok, "reason": sweep_reason})
+    if not sweep_ok:
+        return {"signal": "WAIT", "reason": sweep_reason, "checks": checks, "price": live_price}
+    
+    # KRITERIA 4: Kill Zone (sudah dicek di awal)
+    checks.append({"name": "Kill Zone", "pass": True, "reason": kz_name})
+    
+    # KRITERIA 5: Volume spike
+    vol_ok, vol_reason = check_volume_spike(data_h1)
+    checks.append({"name": "Volume Spike", "pass": vol_ok, "reason": vol_reason})
+    if not vol_ok:
+        return {"signal": "WAIT", "reason": vol_reason, "checks": checks, "price": live_price}
+    
+    # SEMUA KRITERIA TERPENUHI → Hitung SL/TP
+    sl_distance = atr * Config.ATR_SL_MULT
+    
+    if daily_bias == "bullish":
+        sl_price = ob_level if ob_level > 0 else live_price - sl_distance
+        sl_distance = live_price - sl_price
+        tp_price = live_price + (sl_distance * Config.MIN_RR_RATIO)
         direction = "BUY"
-        score = bullish_score
-        reasons = bullish_reasons
-    elif bearish_score > bullish_score:
+    else:
+        sl_price = ob_level if ob_level > 0 else live_price + sl_distance
+        sl_distance = sl_price - live_price
+        tp_price = live_price - (sl_distance * Config.MIN_RR_RATIO)
         direction = "SELL"
-        score = bearish_score
-        reasons = bearish_reasons
-    else:
-        direction = "NEUTRAL"
-        score = 0
-        reasons = []
     
-    return {
-        "valid": True,
-        "tf": tf_name,
-        "direction": direction,
-        "score": score,
-        "max_score": 8,
-        "reasons": reasons,
-        "price": current_price,
-        "atr": atr,
-        "rsi": rsi,
-        "adx": adx,
-        "ema_fast": ema_fast,
-        "ema_mid": ema_mid,
-        "ema_slow": ema_slow,
-        "bb": bb,
-        "macd": macd,
-        "stoch": stoch,
-        "patterns": patterns,
-        "pivots": pivots,
-        "volume": volume
-    }
-
-def combine_signals(m30: Dict, h1: Dict, live_price: float) -> Dict[str, Any]:
-    """Gabungkan sinyal M30 dan H1 dengan sistem grading."""
+    tp_distance = abs(tp_price - live_price)
+    rr_ratio = tp_distance / sl_distance if sl_distance > 0 else Config.MIN_RR_RATIO
     
-    if not m30.get("valid") or not h1.get("valid"):
-        return {
-            "signal": "NO_DATA",
-            "reason": "Data tidak cukup untuk analisis"
-        }
-    
-    # Cek apakah kedua TF setuju
-    if m30["direction"] == "NEUTRAL" and h1["direction"] == "NEUTRAL":
+    # KRITERIA 6: R:R minimal 1:2.5
+    if rr_ratio < Config.MIN_RR_RATIO:
         return {
             "signal": "WAIT",
-            "reason": "Kedua timeframe netral",
-            "m30_score": m30["score"],
-            "h1_score": h1["score"]
+            "reason": f"R:R terlalu kecil (1:{rr_ratio:.1f} < 1:{Config.MIN_RR_RATIO})",
+            "checks": checks,
+            "price": live_price
         }
     
-    if m30["direction"] != h1["direction"] and m30["direction"] != "NEUTRAL" and h1["direction"] != "NEUTRAL":
-        return {
-            "signal": "CONFLICT",
-            "reason": f"M30: {m30['direction']} vs H1: {h1['direction']}",
-            "m30_score": m30["score"],
-            "h1_score": h1["score"],
-            "m30_dir": m30["direction"],
-            "h1_dir": h1["direction"]
-        }
-    
-    # Tentukan arah final (prioritas H1 jika salah satu netral)
-    if m30["direction"] == "NEUTRAL":
-        final_dir = h1["direction"]
-        aligned_tfs = 1
-    elif h1["direction"] == "NEUTRAL":
-        final_dir = m30["direction"]
-        aligned_tfs = 1
-    else:
-        final_dir = m30["direction"]
-        aligned_tfs = 2
-    
-    # Total score (gabungan)
-    total_score = m30["score"] + h1["score"]
-    max_possible = m30["max_score"] + h1["max_score"]
-    
-    # Grade determination
-    if total_score >= Config.GRADE_A_SUPER_MIN_SCORE and aligned_tfs == 2:
-        grade = "A SUPER"
-        rr_ratio = Config.RR_GRADE_A_SUPER
-    elif total_score >= Config.GRADE_A_PLUS_MIN_SCORE and aligned_tfs >= 1:
-        grade = "A+"
-        rr_ratio = Config.RR_GRADE_A_PLUS
-    elif total_score >= Config.GRADE_A_MIN_SCORE and aligned_tfs >= 1:
-        grade = "A"
-        rr_ratio = Config.RR_GRADE_A
-    else:
-        return {
-            "signal": "WAIT",
-            "reason": f"Score terlalu rendah ({total_score}/{max_possible})",
-            "m30_score": m30["score"],
-            "h1_score": h1["score"],
-            "total_score": total_score
-        }
-    
-    # Hitung SL dan TP
-    # Gunakan ATR dari H1 (lebih stabil) untuk SL
-    atr_for_sl = h1["atr"] if h1["atr"] > 0 else m30["atr"]
-    sl_distance = atr_for_sl * Config.ATR_SL_MULT
-    tp_distance = sl_distance * rr_ratio
-    
-    if final_dir == "BUY":
-        sl_price = live_price - sl_distance
-        tp_price = live_price + tp_distance
-    else:
-        sl_price = live_price + sl_distance
-        tp_price = live_price - tp_distance
-    
-    # Kumpulkan semua konfirmasi
-    all_reasons = m30["reasons"] + h1["reasons"]
+    checks.append({"name": "R:R Ratio", "pass": True, "reason": f"1:{rr_ratio:.1f}"})
     
     return {
-        "signal": final_dir,
-        "grade": grade,
-        "total_score": total_score,
-        "max_score": max_possible,
-        "aligned_tfs": aligned_tfs,
-        "entry_price": live_price,
+        "signal": direction,
+        "price": live_price,
         "sl_price": sl_price,
         "tp_price": tp_price,
         "sl_distance": sl_distance,
         "tp_distance": tp_distance,
         "rr_ratio": rr_ratio,
-        "atr": atr_for_sl,
-        "reasons": all_reasons,
-        "m30": m30,
-        "h1": h1
+        "atr": atr,
+        "checks": checks,
+        "kill_zone": kz_name
     }
 
 # ==============================================================================
-# 7. MESSAGE FORMATTER
+# 8. MESSAGE FORMATTER
 # ==============================================================================
-def format_telegram_message(result: Dict) -> str:
-    """Format pesan Telegram yang cantik."""
+def format_message(result: Dict) -> str:
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%d %b %Y %H:%M UTC")
+    now_wib = now + timedelta(hours=7)
+    time_wib = now_wib.strftime("%H:%M WIB")
     
-    if result["signal"] in ["NO_DATA", "WAIT"]:
-        return (
+    if result["signal"] in ["WAIT", "ERROR"]:
+        msg = (
             f"<b>⏸️ {Config.BOT_NAME} v{Config.VERSION} — WAIT</b>\n"
-            f"📅 {date_str}\n"
-            f"💰 XAU/USD: ${result.get('entry_price', 0):.2f}\n"
-            f"──────────────────────\n"
-            f"<b>Alasan:</b> {result['reason']}\n"
-            f"──────────────────────\n"
-            f"<i>Tidak ada konfluensi kuat. Tunggu setup lebih jelas.</i>"
+            f"📅 {date_str} ({time_wib})\n"
         )
+        if "price" in result:
+            msg += f"💰 XAU/USD: ${result['price']:.2f}\n"
+        msg += f"──────────────────────\n<b>Alasan:</b> {result['reason']}\n"
+        
+        if "checks" in result and result["checks"]:
+            msg += f"──────────────────────\n<b>📋 Checklist:</b>\n"
+            for check in result["checks"]:
+                emoji = "✅" if check["pass"] else "❌"
+                msg += f"  {emoji} <b>{check['name']}</b>: {check['reason']}\n"
+        
+        msg += f"──────────────────────\n<i>🎯 Scanner butuh SEMUA kriteria terpenuhi.\nSetup langka = kualitas tinggi.</i>"
+        return msg
     
-    if result["signal"] == "CONFLICT":
-        return (
-            f"<b>⚠️ {Config.BOT_NAME} v{Config.VERSION} — CONFLICT</b>\n"
-            f"📅 {date_str}\n"
-            f"💰 XAU/USD: ${result.get('entry_price', 0):.2f}\n"
-            f"──────────────────────\n"
-            f"<b>M30:</b> {result.get('m30_dir', '?')} (score: {result.get('m30_score', 0)}/8)\n"
-            f"<b>H1:</b> {result.get('h1_dir', '?')} (score: {result.get('h1_score', 0)}/8)\n"
-            f"──────────────────────\n"
-            f"<i>Timeframe tidak setuju. Skip trade ini.</i>"
-        )
-    
-    # Sinyal aktif (BUY/SELL)
+    # Sinyal aktif
     direction = result["signal"]
-    grade = result["grade"]
-    
-    # Grade emoji dan warna
-    grade_emoji = {
-        "A": "🟡",
-        "A+": "🟠",
-        "A SUPER": "🔴"
-    }.get(grade, "⚪")
-    
     dir_emoji = "🟢" if direction == "BUY" else "🔴"
-    
-    # Rekomendasi lot size (berdasarkan 1% risiko)
-    # Asumsi: 1 lot XAUUSD = 100 oz, 1 pip = $0.01, SL dalam $
-    sl_pips = result["sl_distance"] * 100  # konversi ke "pips" gold
-    risk_per_lot = sl_pips  # dalam USD per lot
     
     msg = (
         f"{dir_emoji} <b>{Config.BOT_NAME} v{Config.VERSION}</b>\n"
-        f"{grade_emoji} <b>GRADE: {grade}</b> (Score: {result['total_score']}/{result['max_score']})\n"
-        f"📅 {date_str}\n"
+        f"🔥 <b>HIGH PROBABILITY SETUP</b>\n"
+        f"📅 {date_str} ({time_wib})\n"
+        f"⏰ <b>{result['kill_zone']}</b>\n"
         f"──────────────────────\n"
         f"<b>SINYAL: {direction}</b>\n"
-        f"💰 Entry: ${result['entry_price']:.2f}\n"
+        f"💰 Entry: ${result['price']:.2f}\n"
         f"🎯 TP: ${result['tp_price']:.2f} (+${result['tp_distance']:.2f})\n"
         f"🛑 SL: ${result['sl_price']:.2f} (-${result['sl_distance']:.2f})\n"
-        f"📊 R:R = 1:{result['rr_ratio']}\n"
+        f"📊 R:R = 1:{result['rr_ratio']:.1f}\n"
         f"📏 ATR: ${result['atr']:.2f}\n"
         f"──────────────────────\n"
-        f"<b>✅ Konfluensi ({len(result['reasons'])} poin):</b>\n"
+        f"<b>✅ Checklist (SEMUA terpenuhi):</b>\n"
     )
     
-    for reason in result["reasons"]:
-        msg += f"  • {reason}\n"
+    for check in result["checks"]:
+        msg += f"  ✅ <b>{check['name']}</b>: {check['reason']}\n"
     
     msg += (
         f"──────────────────────\n"
-        f"<b>💼 Rekomendasi Lot (1% risiko):</b>\n"
+        f"<b>💼 Lot Size (1% risiko):</b>\n"
         f"  Modal $1,000 → 0.01 lot\n"
         f"  Modal $5,000 → 0.05 lot\n"
         f"  Modal $10,000 → 0.10 lot\n"
@@ -858,79 +528,48 @@ def format_telegram_message(result: Dict) -> str:
         f"<b>⚠️ ATURAN WAJIB:</b>\n"
         f"• WAJIB pasang SL di ${result['sl_price']:.2f}\n"
         f"• Max 1% modal per trade\n"
-        f"• Grade A: 1x lot normal\n"
-        f"• Grade A+: 1.5x lot normal\n"
-        f"• Grade A SUPER: 2x lot normal\n"
+        f"• Setup langka (2-4x/bulan)\n"
         f"• Konfirmasi manual dengan chart\n"
         f"──────────────────────\n"
-        f"<i>Trading mengandung risiko tinggi. "
-        f"Pastikan Ceu siap kehilangan 1% modal per trade.</i>"
+        f"<i>🎯 High Probability Setup:\n"
+        f"Semua kriteria ketat terpenuhi.\n"
+        f"Tetap forward test di DEMO!</i>"
     )
     
     return msg
 
 # ==============================================================================
-# 8. MAIN EXECUTION
+# 9. MAIN EXECUTION
 # ==============================================================================
 def run():
-    log.info(f"=== 🚀 {Config.BOT_NAME} v{Config.VERSION} ===")
+    log.info(f"=== 🚀 {Config.BOT_NAME} v{Config.VERSION} (High Probability Scanner) ===")
     
-    # 1. Cek weekend
     if Config.SKIP_WEEKEND:
         now_wib = datetime.now(timezone.utc) + timedelta(hours=7)
         if now_wib.weekday() >= 5:
             log.info("Weekend — skip")
             return
     
-    # 2. Ambil harga live
-    live_price = get_live_spot_price()
-    if live_price == 0:
-        log.error("Gagal ambil harga live")
-        send_telegram(f"<b>⚠️ {Config.BOT_NAME}</b>\nGagal ambil harga live. Cek koneksi API.")
-        return
+    result = scan_high_probability_setup()
     
-    # 3. Analisis M30
-    log.info("Analisis M30...")
-    try:
-        data_m30 = fetch_ohlcv("30m", 300)
-        signal_m30 = analyze_timeframe(data_m30, "M30")
-    except Exception as e:
-        log.error(f"Gagal analisis M30: {e}")
-        send_telegram(f"<b>⚠️ {Config.BOT_NAME}</b>\nGagal analisis M30: {e}")
-        return
-    
-    # 4. Analisis H1
-    log.info("Analisis H1...")
-    try:
-        data_h1 = fetch_ohlcv("1h", 300)
-        signal_h1 = analyze_timeframe(data_h1, "H1")
-    except Exception as e:
-        log.error(f"Gagal analisis H1: {e}")
-        send_telegram(f"<b>⚠️ {Config.BOT_NAME}</b>\nGagal analisis H1: {e}")
-        return
-    
-    # 5. Gabungkan sinyal
-    result = combine_signals(signal_m30, signal_h1, live_price)
-    result["entry_price"] = live_price
-    
-    # 6. Anti-loop check
+    # Anti-loop
     state_mgr = StateManager()
     if result["signal"] in ["BUY", "SELL"]:
-        can_send, reason = state_mgr.can_send_signal(result["signal"], live_price)
+        can_send, reason = state_mgr.can_send(result["signal"], result.get("price", 0))
         if not can_send:
             log.info(f"Anti-loop: {reason}")
             return
     
-    # 7. Format & kirim
-    msg = format_telegram_message(result)
+    # Send
+    msg = format_message(result)
     log.info("\n" + msg.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
     
     if send_telegram(msg) and result["signal"] in ["BUY", "SELL"]:
-        state_mgr.record_signal(result["signal"], live_price, result.get("grade", ""))
-        log.info(f"✅ Sinyal {result['signal']} Grade {result.get('grade', '')} tercatat")
+        state_mgr.record(result["signal"], result["price"])
+        log.info(f"✅ Sinyal {result['signal']} tercatat")
 
 # ==============================================================================
-# 9. ENTRY POINT
+# 10. ENTRY POINT
 # ==============================================================================
 if __name__ == "__main__":
     try:
