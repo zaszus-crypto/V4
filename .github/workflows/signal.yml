@@ -2,20 +2,20 @@ name: XAUUSD Signal Bot
 
 on:
   schedule:
-    - cron: '1,31 * * * *'   # Backup trigger (menit :01 & :31)
+    - cron: '2,32 * * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: xauusd-signal-${{ github.ref }}
+  group: xauusd-signal-main
   cancel-in-progress: false
 
 jobs:
   signal:
     runs-on: ubuntu-latest
-    timeout-minutes: 10          # ✅ BENAR: di dalam job, bukan top-level
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,4 +37,5 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: python bot.py
