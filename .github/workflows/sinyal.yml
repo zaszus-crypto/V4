@@ -2,8 +2,7 @@ name: XAU/USD Grade Signal
 
 on:
   schedule:
-    - cron: "0 7,9,11,13,15 * * 1-5"  # Setiap 2 jam di Kill Zone saja
-    
+     - cron: "0,15,30,45 7,8,9,12,13,14 * * 1-5" # Sesuai dengan WIB 14:00-17:00 & 19:00-22:00
   # Manual trigger
   workflow_dispatch:
 
