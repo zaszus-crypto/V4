@@ -1,0 +1,50 @@
+name: XAU/USD Grade Signal
+
+on:
+  # Setiap 4 jam di hari kerja (sesuai cooldown)
+  schedule:
+    - cron: "0 1,5,9,13,17,21 * * 1-5"  # UTC = 08:00, 12:00, 16:00, 20:00, 00:00, 04:00 WIB
+  
+  # Manual trigger
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  signal:
+    name: Generate XAU/USD Signal
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: Run XAU/USD Bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python xauusd_bot.py
+      
+      - name: Commit state file (anti-loop)
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .last_signal_state.json || true
+          git diff --staged --quiet || git commit -m "🔄 Update signal state [skip ci]"
+          git push || echo "No changes to push"
