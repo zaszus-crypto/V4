@@ -12,11 +12,10 @@ concurrency:
   group: xauusd-signal-${{ github.ref }}
   cancel-in-progress: false
 
-timeout-minutes: 10
-
 jobs:
   signal:
     runs-on: ubuntu-latest
+    timeout-minutes: 10          # ✅ BENAR: di dalam job, bukan top-level
     steps:
       - name: Checkout
         uses: actions/checkout@v4
