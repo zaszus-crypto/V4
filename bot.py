@@ -1,5 +1,5 @@
 """
-XAUUSD Signal Bot — Single File Edition
+XAUUSD Signal Bot — Final Edition
 Grade A / A+ / A+++ | Multi-source failover | Anti-spam | Auto state
 """
 import os
@@ -51,64 +51,64 @@ def _headers():
     return {"User-Agent": random.choice(USER_AGENTS)}
 
 
-def _fetch_yfinance(interval: str, limit: int = 300):
+def _fetch_yfinance(interval: str, limit: int = 500):
     """Sumber utama: yfinance GC=F (Gold Futures)."""
     try:
         import yfinance as yf
         yf_interval = "30m" if interval == "30m" else "1h"
-        period = "5d" if yf_interval == "30m" else "1mo"
+        period = "60d" if yf_interval == "30m" else "90d"
         df = yf.download("GC=F", interval=yf_interval, period=period,
                          progress=False, auto_adjust=False)
-        if df is None or len(df) < 50:
+        if df is None or len(df) < 200:
             return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
         df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
         df = df.dropna().tail(limit)
-        return df if len(df) >= 50 else None
+        return df if len(df) >= 200 else None
     except Exception as e:
         log.warning("yfinance gagal: %s", e)
         return None
 
 
-def _fetch_yahoo_forex(interval: str, limit: int = 300):
+def _fetch_yahoo_forex(interval: str, limit: int = 500):
     """Fallback: XAUUSD=X spot forex dari Yahoo."""
     try:
         import yfinance as yf
         yf_interval = "30m" if interval == "30m" else "1h"
-        period = "5d" if yf_interval == "30m" else "1mo"
+        period = "60d" if yf_interval == "30m" else "90d"
         df = yf.download("XAUUSD=X", interval=yf_interval, period=period,
                          progress=False, auto_adjust=False)
-        if df is None or len(df) < 50:
+        if df is None or len(df) < 200:
             return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
         df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
         df = df.dropna().tail(limit)
-        return df if len(df) >= 50 else None
+        return df if len(df) >= 200 else None
     except Exception as e:
         log.warning("yahoo-forex gagal: %s", e)
         return None
 
 
-def _fetch_stooq(interval: str, limit: int = 300):
-    """Fallback: stooq CSV endpoint (gratis, tanpa key)."""
+def _fetch_stooq(interval: str, limit: int = 500):
+    """Fallback: stooq CSV (gratis, tanpa key)."""
     try:
-        # stooq menyediakan XAUUSD daily; intraday terbatas
         url = "https://stooq.com/q/d/l/?s=xauusd&i=d"
         r = requests.get(url, headers=_headers(), timeout=TIMEOUT)
         if r.status_code != 200:
             return None
         from io import StringIO
         df = pd.read_csv(StringIO(r.text))
-        if len(df) < 50:
+        if len(df) < 200:
             return None
         df["Date"] = pd.to_datetime(df["Date"], utc=True)
         df.set_index("Date", inplace=True)
         df = df.rename(columns={"Open": "Open", "High": "High",
                                 "Low": "Low", "Close": "Close",
                                 "Volume": "Volume"})
-        df["Volume"] = df.get("Volume", 0)
+        if "Volume" not in df.columns:
+            df["Volume"] = 0
         df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
         return df.tail(limit)
     except Exception as e:
@@ -116,7 +116,7 @@ def _fetch_stooq(interval: str, limit: int = 300):
         return None
 
 
-def fetch_ohlc(interval: str, limit: int = 300):
+def fetch_ohlc(interval: str, limit: int = 500):
     """Coba 3 sumber berurutan. Return DataFrame pertama yang berhasil."""
     sources = [
         ("yfinance", _fetch_yfinance),
@@ -125,7 +125,7 @@ def fetch_ohlc(interval: str, limit: int = 300):
     ]
     for name, fn in sources:
         df = fn(interval, limit)
-        if df is not None and len(df) >= 50:
+        if df is not None and len(df) >= 200:
             log.info("✅ Data %s dari %s (%d bar)", interval, name, len(df))
             return df
         log.warning("❌ Sumber %s gagal untuk %s", name, interval)
@@ -155,27 +155,14 @@ def fetch_dxy_bias():
 
 
 def news_blackout():
-    """
-    News blackout sederhana: cek apakah sekarang dalam window 30 menit
-    di sekitar rilis data ekonomi utama AS.
-    Format rilis (UTC, ±30 menit):
-      - NFP: Jumat pertama bulan, 12:30 UTC
-      - CPI: sekitar tanggal 10-15, 12:30 UTC
-      - FOMC: Rabu tertentu, 18:00 UTC
-    Karena kalender gratis tidak tersedia reliable tanpa key,
-    kita pakai blackout berbasis hari/jam statis.
-    """
+    """News blackout berbasis hari/jam statis (NFP/CPI/FOMC)."""
     now = datetime.now(timezone.utc)
-    # NFP: Jumat pertama bulan, 12:30 UTC
     if now.weekday() == 4 and now.day <= 7:
         if 12 <= now.hour < 13:
             return True
-    # CPI: tanggal 10-15, 12:30 UTC
     if 10 <= now.day <= 15 and 12 <= now.hour < 13:
-        # Rabu/Kamis umumnya CPI
         if now.weekday() in (2, 3):
             return True
-    # FOMC: Rabu, 18:00 UTC
     if now.weekday() == 2 and 18 <= now.hour < 19:
         return True
     return False
@@ -362,7 +349,7 @@ def grade_signal(df_m30, df_h1, df_h4, direction, entry, sl, tp,
 
     # A+ BONUS
     if adx_m30 > 30:
-        score += 5; factors.append(f"⭐ ADX M30 > 30")
+        score += 5; factors.append("⭐ ADX M30 > 30")
     adx_h1 = h1["ADX14"] if not pd.isna(h1["ADX14"]) else 0
     if adx_h1 > 25:
         score += 5; factors.append(f"⭐ ADX H1 {adx_h1:.1f}")
@@ -421,28 +408,42 @@ def grade_signal(df_m30, df_h1, df_h4, direction, entry, sl, tp,
 
 def analyze_m30(df_m30, df_h1, df_h4, bias, dxy, news_black):
     if bias == "RANGING":
-        log.info("H1 ranging — skip")
+        log.info("❌ H1 ranging — skip")
         return None
+
     df = add_indicators(df_m30)
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
     if pd.isna(last["ATR14"]) or last["ATR14"] <= 0:
+        log.info("❌ ATR invalid")
         return None
     if pd.isna(last["RSI14"]) or pd.isna(prev["RSI14"]):
+        log.info("❌ RSI invalid")
         return None
 
     atr_v = last["ATR14"]
     price = last["Close"]
     dist = abs(price - last["EMA20"]) / atr_v
+
+    adx_val = last["ADX14"] if not pd.isna(last["ADX14"]) else 0
+    log.info("📊 DIAGNOSTIC M30:")
+    log.info("   Price: %.2f | EMA20: %.2f | ATR: %.2f | RSI: %.1f | ADX: %.1f",
+             price, last["EMA20"], atr_v, last["RSI14"], adx_val)
+    log.info("   Distance to EMA20: %.2f ATR (butuh ≤ 1.0)", dist)
+
     if dist > 1.0:
+        log.info("❌ Terlalu jauh dari EMA20 (%.2f ATR > 1.0)", dist)
         return None
 
     if bias == "BULLISH":
         rsi_cross = prev["RSI14"] < 50 <= last["RSI14"]
         rsi_pb = 40 <= last["RSI14"] <= 60
         candle = last["Close"] > last["Open"]
+        log.info("   BUY check: RSI_cross=%s | RSI_pb=%s | Candle=%s",
+                 rsi_cross, rsi_pb, candle)
         if not (rsi_cross or (rsi_pb and candle)):
+            log.info("❌ BUY tidak valid")
             return None
         direction = "BUY"
         sl = price - 1.5 * atr_v
@@ -451,7 +452,10 @@ def analyze_m30(df_m30, df_h1, df_h4, bias, dxy, news_black):
         rsi_cross = prev["RSI14"] > 50 >= last["RSI14"]
         rsi_pb = 40 <= last["RSI14"] <= 60
         candle = last["Close"] < last["Open"]
+        log.info("   SELL check: RSI_cross=%s | RSI_pb=%s | Candle=%s",
+                 rsi_cross, rsi_pb, candle)
         if not (rsi_cross or (rsi_pb and candle)):
+            log.info("❌ SELL tidak valid")
             return None
         direction = "SELL"
         sl = price + 1.5 * atr_v
@@ -461,9 +465,10 @@ def analyze_m30(df_m30, df_h1, df_h4, bias, dxy, news_black):
 
     g = grade_signal(df, df_h1, df_h4, direction, price, sl, tp, dxy, news_black)
     if g is None:
-        log.info("Grade NONE — sinyal ditolak")
+        log.info("❌ Grade NONE — sinyal ditolak (skor < 60)")
         return None
 
+    log.info("✅ SINYAL VALID — Grade %s | Skor %d", g["grade"], g["score"])
     return Signal(
         pair="XAUUSD", direction=direction,
         entry=round(price, 2), sl=round(sl, 2), tp=round(tp, 2),
@@ -646,16 +651,31 @@ def main():
     log.info("=" * 50)
     log.info("XAUUSD Bot mulai — %s", datetime.now(timezone.utc).isoformat())
 
+    # ✅ FORCE_TEST: verifikasi Telegram (hapus env FORCE_TEST setelah OK)
+    if os.environ.get("FORCE_TEST") == "1":
+        log.info("🧪 FORCE_TEST mode aktif — kirim sinyal dummy")
+        dummy = Signal(
+            pair="XAUUSD", direction="BUY",
+            entry=2650.00, sl=2645.00, tp=2663.00,
+            timeframe="M30", grade="A+++", score=95,
+            factors=["✅ TEST mode", "⭐ Verifikasi Telegram", "💎 Bukan sinyal asli"],
+            risk_percent=1.5, lot_multiplier=3,
+            reason="TEST",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        send_telegram(dummy)
+        return
+
     ok, reason = should_run_now()
     log.info("Window check: %s", reason)
     if not ok:
         log.info("Skip eksekusi.")
         return
 
-    df_h1 = fetch_ohlc("1h")
+    df_h1 = fetch_ohlc("1h", limit=500)
     if df_h1 is None:
         return
-    df_m30 = fetch_ohlc("30m")
+    df_m30 = fetch_ohlc("30m", limit=500)
     if df_m30 is None:
         return
     df_h4 = fetch_ohlc("1h", limit=500)
