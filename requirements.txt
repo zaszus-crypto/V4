@@ -6,4 +6,6 @@ yfinance>=0.2.28
 yfinance>=0.2.30
 mplfinance>=0.12.10b0
 matplotlib>=3.7.0
+yfinance>=0.2.40
+mplfinance>=0.12.10
 
