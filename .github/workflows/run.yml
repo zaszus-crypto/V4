@@ -2,14 +2,16 @@ name: Run XAU/USD Predator Bot
 
 on:
   schedule:
-    # Jalan setiap jam pada menit ke-0 (Senin - Jumat)
     - cron: '0 * * * 1-5'
-  workflow_dispatch: # Memungkinkan run manual dari tab Actions
+  workflow_dispatch:
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Code
@@ -25,14 +27,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Paksa upgrade yfinance ke versi paling mutakhir saat build
-          pip install --upgrade yfinance
 
       - name: Run Predator Bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SYMBOL: "XAUUSD=X" # Gunakan Spot XAUUSD=X default di Secrets/Env
+          SYMBOL: "GC=F"
           ACCOUNT_BALANCE: "10000"
           RISK_PERCENT: "1.0"
         run: python bot.py
