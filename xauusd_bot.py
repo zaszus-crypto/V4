@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XAU/USD PREDATOR v6.1 (SUPER GRADE - FIXED)
-Logika: Liquidity Sweep -> ChoCh -> Retest FVG -> Entry
-SL: Di bawah/atas Wick Sweep (Anti-Hunt)
-TP: Di Likuiditas Swing berikutnya
+XAU/USD PREDATOR v6.2 (FIXED TREND DETECTION)
+Fix: D1 trend filter terlalu ketat → sekarang pakai 3 metode voting.
 Aktif: 24 jam Senin-Jumat | Libur: Sabtu-Minggu
 """
 import os
@@ -22,20 +20,16 @@ from typing import List, Dict, Any, Optional, Tuple
 # 1. KONFIGURASI
 # ==============================================================================
 class Config:
-    VERSION = "6.1"
+    VERSION = "6.2"
     BOT_NAME = "XAU/USD PREDATOR"
     
-    # === JADWAL OPERASIONAL ===
-    # Aktif 24 jam Senin-Jumat, libur total Sabtu-Minggu
     SKIP_WEEKEND = True
     
-    # === PARAMETER TEKNIS ===
     SWING_LOOKBACK = 5
     FVG_MIN_SIZE_ATR = 0.5
     SL_WICK_BUFFER_ATR = 0.3
-    SWEEP_LOOKBACK_CANDLES = 5  # Cek 5 candle terakhir untuk sweep
+    SWEEP_LOOKBACK_CANDLES = 5
     
-    # === SAFETY ===
     COOLDOWN_HOURS = 8
     FETCH_DELAY = 1.0
     FETCH_TIMEOUT = 30
@@ -171,7 +165,7 @@ def aggregate_ohlcv(data: List[Dict], n: int) -> List[Dict]:
     return result
 
 # ==============================================================================
-# 5. INDICATOR CALCULATIONS (FIXED)
+# 5. INDICATOR CALCULATIONS
 # ==============================================================================
 def calc_atr(data: List[Dict], period: int = 14) -> float:
     if len(data) < 2: return 0.0
@@ -179,13 +173,23 @@ def calc_atr(data: List[Dict], period: int = 14) -> float:
     return sum(trs[-period:]) / period if len(trs) >= period else (sum(trs) / len(trs) if trs else 0.0)
 
 def calc_ema(values: List[float], period: int) -> float:
-    """EMA calculation yang BENAR"""
     if len(values) < period: return values[-1] if values else 0.0
     multiplier = 2 / (period + 1)
     ema = sum(values[:period]) / period
     for price in values[period:]:
         ema = (price - ema) * multiplier + ema
     return ema
+
+def calc_ema_series(values: List[float], period: int) -> List[float]:
+    """Hitung full EMA series untuk slope detection"""
+    if len(values) < period: return values
+    multiplier = 2 / (period + 1)
+    ema = sum(values[:period]) / period
+    result = [ema]
+    for price in values[period:]:
+        ema = (price - ema) * multiplier + ema
+        result.append(ema)
+    return result
 
 def find_swing_points(data: List[Dict], lookback: int = 5) -> Dict[str, List[Dict]]:
     highs, lows = [], []
@@ -204,41 +208,89 @@ def find_fvg(data: List[Dict], atr: float) -> List[Dict]:
             fvgs.append({"type": "bullish", "top": c3["low"], "bottom": c1["high"], "idx": i-1})
         elif c3["high"] < c1["low"] and (c1["low"] - c3["high"]) > (atr * Config.FVG_MIN_SIZE_ATR):
             fvgs.append({"type": "bearish", "top": c1["low"], "bottom": c3["high"], "idx": i-1})
-    return fvgs[-10:]  # Ambil 10 FVG terakhir
+    return fvgs[-10:]
 
 def is_weekend() -> bool:
-    """Cek apakah sekarang Sabtu atau Minggu"""
     now_wib = datetime.now(timezone.utc) + timedelta(hours=7)
-    return now_wib.weekday() >= 5  # 5 = Saturday, 6 = Sunday
+    return now_wib.weekday() >= 5
 
 # ==============================================================================
-# 6. CORE LOGIC: THE PREDATOR (FIXED)
+# 6. SMART TREND DETECTION (FIXED)
+# ==============================================================================
+def detect_daily_trend(data_d1: List[Dict], live_price: float) -> Tuple[str, str]:
+    """
+    Deteksi trend Daily menggunakan 3 metode voting.
+    Jika 2 dari 3 setuju → trend valid.
+    Return: (bias, reason)
+    """
+    closes = [d["close"] for d in data_d1]
+    if len(closes) < 200:
+        return "neutral", "Data D1 kurang dari 200 bar"
+    
+    ema50 = calc_ema(closes, 50)
+    ema200 = calc_ema(closes, 200)
+    
+    # Hitung EMA series untuk slope
+    ema50_series = calc_ema_series(closes, 50)
+    
+    bullish_votes = 0
+    bearish_votes = 0
+    reasons = []
+    
+    # METODE 1: EMA Cross (EMA 50 vs EMA 200)
+    if ema50 > ema200:
+        bullish_votes += 1
+        reasons.append(f"EMA50({ema50:.0f}) > EMA200({ema200:.0f})")
+    elif ema50 < ema200:
+        bearish_votes += 1
+        reasons.append(f"EMA50({ema50:.0f}) < EMA200({ema200:.0f})")
+    
+    # METODE 2: EMA 50 Slope (arah kemiringan 10 bar terakhir)
+    if len(ema50_series) >= 10:
+        slope = ema50_series[-1] - ema50_series[-10]
+        if slope > 0:
+            bullish_votes += 1
+            reasons.append(f"EMA50 slope naik (+{slope:.1f})")
+        elif slope < 0:
+            bearish_votes += 1
+            reasons.append(f"EMA50 slope turun ({slope:.1f})")
+    
+    # METODE 3: Price Position relatif terhadap EMA 200
+    price_vs_ema200_pct = (live_price - ema200) / ema200 * 100
+    if price_vs_ema200_pct > 1.0:  # Harga > 1% di atas EMA 200
+        bullish_votes += 1
+        reasons.append(f"Harga {price_vs_ema200_pct:+.1f}% dari EMA200")
+    elif price_vs_ema200_pct < -1.0:  # Harga > 1% di bawah EMA 200
+        bearish_votes += 1
+        reasons.append(f"Harga {price_vs_ema200_pct:+.1f}% dari EMA200")
+    
+    # Voting result: butuh minimal 2 dari 3
+    if bullish_votes >= 2:
+        return "bullish", " | ".join(reasons)
+    elif bearish_votes >= 2:
+        return "bearish", " | ".join(reasons)
+    else:
+        return "neutral", " | ".join(reasons) if reasons else "Tidak ada sinyal trend"
+
+# ==============================================================================
+# 7. CORE LOGIC: THE PREDATOR
 # ==============================================================================
 def analyze_predator_setup(data_d1: List[Dict], data_h4: List[Dict], data_h1: List[Dict], live_price: float) -> Dict[str, Any]:
     atr_h1 = calc_atr(data_h1, 14)
     if atr_h1 == 0: return {"signal": "WAIT", "reason": "ATR tidak valid"}
     
-    # 1. D1 Trend Filter (EMA yang BENAR)
-    closes_d1 = [d["close"] for d in data_d1]
-    if len(closes_d1) < 200: return {"signal": "WAIT", "reason": "Data D1 kurang"}
-    ema50 = calc_ema(closes_d1, 50)
-    ema200 = calc_ema(closes_d1, 200)
+    # 1. D1 Trend Filter (SMART - 3 metode voting)
+    bias, trend_reason = detect_daily_trend(data_d1, live_price)
+    if bias == "neutral":
+        return {"signal": "WAIT", "reason": f"D1 Netral: {trend_reason}"}
     
-    if live_price > ema50 > ema200:
-        bias = "bullish"
-    elif live_price < ema50 < ema200:
-        bias = "bearish"
-    else:
-        return {"signal": "WAIT", "reason": "D1 Netral, tidak ada arah jelas"}
-    
-    # 2. H4 Liquidity Sweep Detection (FIXED: cek beberapa candle terakhir)
+    # 2. H4 Liquidity Sweep Detection
     swings_h4 = find_swing_points(data_h4, 3)
     sweep_valid = False
     sweep_level = 0.0
     
     if bias == "bullish" and swings_h4["lows"]:
         last_low = swings_h4["lows"][-1]["price"]
-        # Cek 5 candle terakhir untuk sweep
         for i in range(1, min(Config.SWEEP_LOOKBACK_CANDLES + 1, len(data_h4))):
             candle = data_h4[-i]
             if candle["low"] < last_low and candle["close"] > last_low:
@@ -256,18 +308,16 @@ def analyze_predator_setup(data_d1: List[Dict], data_h4: List[Dict], data_h1: Li
                 break
             
     if not sweep_valid:
-        return {"signal": "WAIT", "reason": "Belum ada Liquidity Sweep di H4"}
+        return {"signal": "WAIT", "reason": f"D1 {bias.upper()} tapi belum ada Liquidity Sweep di H4"}
     
-    # 3. H1 FVG Detection (FIXED: retest pattern)
+    # 3. H1 FVG Detection
     fvgs_h1 = find_fvg(data_h1, atr_h1)
     
     target_fvg = None
     if bias == "bullish":
-        # Cari FVG Bullish yang sudah pernah di-retest
         for fvg in fvgs_h1:
             if fvg["type"] == "bullish" and fvg["bottom"] > sweep_level:
-                # Cek apakah harga pernah masuk FVG dan sekarang di dekat FVG
-                if live_price >= fvg["bottom"] and live_price <= fvg["top"] * 1.002:  # 0.2% tolerance
+                if live_price >= fvg["bottom"] and live_price <= fvg["top"] * 1.002:
                     target_fvg = fvg
                     break
     else:
@@ -278,37 +328,26 @@ def analyze_predator_setup(data_d1: List[Dict], data_h4: List[Dict], data_h1: Li
                     break
                 
     if not target_fvg:
-        return {"signal": "WAIT", "reason": "Harga belum retest ke area FVG valid"}
+        return {"signal": "WAIT", "reason": f"D1 {bias.upper()} + H4 Sweep OK, tapi harga belum retest FVG"}
     
-    # 4. Kalkulasi SL & TP (Anti-Hunt)
+    # 4. Kalkulasi SL & TP
     if bias == "bullish":
         sl_price = sweep_level - (atr_h1 * Config.SL_WICK_BUFFER_ATR)
         sl_distance = live_price - sl_price
-        
-        # TP di swing high H4 berikutnya (dengan validasi)
-        if swings_h4["highs"]:
-            tp_price = swings_h4["highs"][-1]["price"]
-        else:
-            tp_price = live_price + (sl_distance * 2.5)
-        
+        tp_price = swings_h4["highs"][-1]["price"] if swings_h4["highs"] else live_price + (sl_distance * 2.5)
         tp_distance = tp_price - live_price
         direction = "BUY"
     else:
         sl_price = sweep_level + (atr_h1 * Config.SL_WICK_BUFFER_ATR)
         sl_distance = sl_price - live_price
-        
-        if swings_h4["lows"]:
-            tp_price = swings_h4["lows"][-1]["price"]
-        else:
-            tp_price = live_price - (sl_distance * 2.5)
-        
+        tp_price = swings_h4["lows"][-1]["price"] if swings_h4["lows"] else live_price - (sl_distance * 2.5)
         tp_distance = live_price - tp_price
         direction = "SELL"
         
     rr_ratio = tp_distance / sl_distance if sl_distance > 0 else 0
     
     if rr_ratio < 2.0:
-        return {"signal": "WAIT", "reason": f"R:R tidak memenuhi syarat (1:{rr_ratio:.1f})"}
+        return {"signal": "WAIT", "reason": f"R:R tidak memenuhi (1:{rr_ratio:.1f})"}
     
     return {
         "signal": direction,
@@ -318,18 +357,17 @@ def analyze_predator_setup(data_d1: List[Dict], data_h4: List[Dict], data_h1: Li
         "sl_dist": sl_distance,
         "tp_dist": tp_distance,
         "rr": rr_ratio,
-        "reason": f"D1 {bias.upper()} | H4 Sweep @ {sweep_level:.2f} | H1 Retest FVG"
+        "reason": f"D1 {bias.upper()} ({trend_reason}) | H4 Sweep @ {sweep_level:.2f} | H1 Retest FVG"
     }
 
 # ==============================================================================
-# 7. MAIN EXECUTION
+# 8. MAIN EXECUTION
 # ==============================================================================
 def run():
     log.info(f"=== 🚀 {Config.BOT_NAME} v{Config.VERSION} ===")
     
-    # Cek weekend
     if Config.SKIP_WEEKEND and is_weekend():
-        log.info("Weekend (Sabtu/Minggu) — bot libur")
+        log.info("Weekend — bot libur")
         return
     
     live_price = get_live_spot_price()
@@ -371,13 +409,12 @@ def run():
             f"──────────────────────\n"
             f"<b>🧠 Logika Predator:</b>\n"
             f"  • {result['reason']}\n"
-            f"  • SL di luar jangkauan 'Wick Hunt'\n"
+            f"  • SL di luar jangkauan Wick Hunt\n"
             f"  • Entry saat retest FVG\n"
             f"──────────────────────\n"
             f"<b>⚠️ ATURAN MUTLAK:</b>\n"
-            f"• Pasang SL di ${result['sl']:.2f} (JANGAN DIGESER)\n"
-            f"• Risiko maksimal 1% dari modal\n"
-            f"• Jika harga belum masuk area FVG, JANGAN ENTRY\n"
+            f"• Pasang SL di ${result['sl']:.2f}\n"
+            f"• Risiko maksimal 1% modal\n"
             f"──────────────────────\n"
             f"<i>Eksekusi berdasarkan jejak institusi.</i>"
         )
