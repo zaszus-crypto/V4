@@ -1,34 +1,47 @@
-name: XAU/USD Predator Bot
+name: Run XAU/USD Predator Bot
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
-  workflow_dispatch:
+    # Jalan setiap jam pada menit ke-0 (Senin - Jumat)
+    - cron: '0 * * * 1-5'
+  workflow_dispatch: # Memungkinkan run manual dari tab Actions
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Paksa upgrade yfinance ke versi paling mutakhir saat build
+          pip install --upgrade yfinance
 
-      - name: Install System Fonts (Wajib agar Chart Muncul)
-        run: sudo apt-get update && sudo apt-get install -y fonts-liberation fontconfig
-
-      - name: Run bot
+      - name: Run Predator Bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ACCOUNT_BALANCE: ${{ secrets.ACCOUNT_BALANCE || '10000.0' }}
-          RISK_PERCENT: ${{ secrets.RISK_PERCENT || '1.0' }}
-          SYMBOL: ${{ secrets.SYMBOL || 'GC=F' }}
+          SYMBOL: "XAUUSD=X" # Gunakan Spot XAUUSD=X default di Secrets/Env
+          ACCOUNT_BALANCE: "10000"
+          RISK_PERCENT: "1.0"
         run: python bot.py
+
+      - name: Commit & Push State File
+        if: always()
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action Bot"
+          git add predator_state.json || true
+          git commit -m "update bot state [skip ci]" || true
+          git push || true
